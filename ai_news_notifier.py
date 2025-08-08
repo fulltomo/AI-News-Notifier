@@ -25,7 +25,7 @@ def get_ai_news():
            f"q=AI&"
            f"from={from_date}&"
            f"sortBy=popularity&"
-           f"language=en&"
+           f"language=ja&"
            f"pageSize=5&"
            f"apiKey={NEWS_API_KEY}")
 
