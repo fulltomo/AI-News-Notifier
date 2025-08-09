@@ -2,16 +2,23 @@ import os
 import requests
 import json
 from datetime import datetime, timedelta
-from groq import Groq
+import google.generativeai as genai
 
 # --- 環境変数からAPIキーとURLを取得 ---
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # 必要な環境変数が設定されているかチェック
-if not all([NEWS_API_KEY, GROQ_API_KEY, DISCORD_WEBHOOK_URL]):
-    raise ValueError("必要な環境変数が設定されていません: NEWS_API_KEY, GROQ_API_KEY, DISCORD_WEBHOOK_URL")
+if not all([NEWS_API_KEY, GEMINI_API_KEY, DISCORD_WEBHOOK_URL]):
+    raise ValueError("必要な環境変数が設定されていません: NEWS_API_KEY, GEMINI_API_KEY, DISCORD_WEBHOOK_URL")
+
+# --- Gemini APIの初期設定 ---
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+except Exception as e:
+    raise ValueError(f"Gemini APIキーの設定に失敗しました: {e}")
+
 
 def get_ai_news():
     """News APIからAI関連の最新ニュースを5件取得する"""
@@ -47,42 +54,42 @@ def get_ai_news():
         return []
 
 
-def summarize_and_categorize_with_groq(article_content: str):
-    """Groq APIを使用して記事を要約し、カテゴリ分けする"""
+def summarize_and_categorize_with_gemini(article_content: str):
+    """Gemini APIを使用して記事を要約し、カテゴリ分けする"""
     if not article_content:
         return {"summary": "記事の内容が空のため、要約できませんでした。", "category": "不明"}
 
-    print("Groqで要約とカテゴリ分けを実行中...")
+    print("Geminiで要約とカテゴリ分けを実行中...")
     try:
-        client = Groq(api_key=GROQ_API_KEY)
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "あなたは優秀なAIニュースのアナリストです。"
-                        "提供されたニュース記事の本文を日本語で3文で簡潔に要約し、"
-                        "内容に最も適したカテゴリを['技術開発', 'ビジネス応用', '倫理・規制', '研究', 'その他']の中から一つ選んでください。"
-                        "出力は必ず以下のJSON形式で返してください。\n"
-                        "例: {\"summary\": \"要約文...\", \"category\": \"カテゴリ名\"}"
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"以下の記事を要約・カテゴリ分けしてください:\n\n{article_content}"
-                }
-            ],
-            model="llama3-70b-8192",
-            temperature=0.5,
-            max_tokens=1024,
-            top_p=1,
-            stream=False,
-            response_format={"type": "json_object"},
+        # 使用するモデルを定義
+        model = genai.GenerativeModel('gemini-1.5-flash')
+
+        # プロンプトを定義
+        prompt = (
+            "あなたは優秀なAIニュースのアナリストです。"
+            "提供されたニュース記事の本文を日本語で3文で簡潔に要約し、"
+            "内容に最も適したカテゴリを['技術開発', 'ビジネス応用', '倫理・規制', '研究', 'その他']の中から一つ選んでください。"
+            "出力は必ず以下のJSON形式で返してください。\n"
+            "例: {\"summary\": \"要約文...\", \"category\": \"カテゴリ名\"}\n\n"
+            f"以下の記事を要約・カテゴリ分けしてください:\n\n{article_content}"
         )
-        response_content = chat_completion.choices[0].message.content
-        return json.loads(response_content)
+
+        # JSONモードでレスポンスを生成するように設定
+        generation_config = genai.types.GenerationConfig(
+            response_mime_type="application/json"
+        )
+
+        # APIを呼び出し
+        response = model.generate_content(
+            prompt,
+            generation_config=generation_config
+        )
+
+        # レスポンスのテキスト部分をJSONとしてパース
+        return json.loads(response.text)
+
     except Exception as e:
-        print(f"Groq APIの処理中にエラーが発生しました: {e}")
+        print(f"Gemini APIの処理中にエラーが発生しました: {e}")
         return {"summary": "要約中にエラーが発生しました。", "category": "エラー"}
 
 def send_to_discord(articles_with_summaries):
@@ -137,7 +144,8 @@ def main():
     for article in articles:
         # 記事の本文または説明文を要約対象とする
         content_to_summarize = article.get('content') or article.get('description', '')
-        summary_data = summarize_and_categorize_with_groq(content_to_summarize)
+        # Geminiを呼び出すように変更
+        summary_data = summarize_and_categorize_with_gemini(content_to_summarize)
 
         # 元の記事情報と要約結果を結合
         article_info = {
