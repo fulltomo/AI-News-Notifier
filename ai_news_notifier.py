@@ -4,161 +4,127 @@ import json
 from datetime import datetime, timedelta
 import google.generativeai as genai
 
-# --- 環境変数からAPIキーとURLを取得 ---
+# 環境変数の読み込み
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
-# 必要な環境変数が設定されているかチェック
-if not all([NEWS_API_KEY, GEMINI_API_KEY, DISCORD_WEBHOOK_URL]):
-    raise ValueError("必要な環境変数が設定されていません: NEWS_API_KEY, GEMINI_API_KEY, DISCORD_WEBHOOK_URL")
 
-# --- Gemini APIの初期設定 ---
-try:
-    genai.configure(api_key=GEMINI_API_KEY)
-except Exception as e:
-    raise ValueError(f"Gemini APIキーの設定に失敗しました: {e}")
+# 必要な環境変数のチェック
+if not all([NEWS_API_KEY, GEMINI_API_KEY, DISCORD_WEBHOOK_URL]):
+    raise ValueError("環境変数が設定されていません")
+
+# Gemini APIの設定
+genai.configure(api_key=GEMINI_API_KEY)
 
 
 def get_ai_news():
-    """News APIからAI関連の最新ニュースを5件取得する"""
-    print("AI関連ニュースを取得中...")
-    today = datetime.now()
-    yesterday = today - timedelta(days=1)
-    from_date = yesterday.strftime('%Y-%m-%d')
-
-    # News APIのエンドポイントとパラメータ
+    """News APIからAI関連ニュースを取得"""
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    
     url = (f"https://newsapi.org/v2/everything?"
-           f"q=AI&"
-           f"from={from_date}&"
-           f"sortBy=popularity&"
-           f"language=en&"
-           f"pageSize=5&"
-           f"apiKey={NEWS_API_KEY}")
+           f"q=AI&from={yesterday}&sortBy=popularity&"
+           f"language=en&pageSize=5&apiKey={NEWS_API_KEY}")
 
     try:
         response = requests.get(url)
-        response.raise_for_status()  # HTTPエラーがあれば例外を発生させる
-        news_data = response.json()
-        articles = news_data.get("articles", [])
-        if not articles:
-            print("ニュースが見つかりませんでした。")
-            return []
-        print(f"{len(articles)}件のニュースを取得しました。")
-        return articles
-    except requests.exceptions.RequestException as e:
-        print(f"News APIからのニュース取得に失敗しました: {e}")
-        return []
-    except json.JSONDecodeError as e:
-        print(f"News APIのレスポンス解析に失敗しました: {e}")
+        response.raise_for_status()
+        return response.json().get("articles", [])
+    except requests.RequestException as e:
+        print(f"ニュース取得エラー: {e}")
         return []
 
 
-def summarize_and_categorize_with_gemini(article_content: str):
-    """Gemini APIを使用して記事を要約し、カテゴリ分けする"""
-    if not article_content:
-        return {"summary": "記事の内容が空のため、要約できませんでした。", "category": "不明"}
+def summarize_with_gemini(content):
+    """Geminiで記事を要約・カテゴリ分け"""
+    if not content:
+        return {"summary": "内容が取得できませんでした", "category": "不明"}
 
-    print("Geminiで要約とカテゴリ分けを実行中...")
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    prompt = (
+        "以下のAIニュースを日本語で3文で要約し、"
+        "['技術開発', 'ビジネス応用', '倫理・規制', '研究', 'その他']"
+        "からカテゴリを選んで、必ず以下の形式で返してください：\n"
+        '{"summary": "要約文", "category": "カテゴリ名"}\n\n'
+        f"記事: {content}"
+    )
+
     try:
-        # 使用するモデルを定義
-        model = genai.GenerativeModel('gemini-1.5-flash')
-
-        # プロンプトを定義
-        prompt = (
-            "あなたは優秀なAIニュースのアナリストです。"
-            "提供されたニュース記事の本文を日本語で3文で簡潔に要約し、"
-            "内容に最も適したカテゴリを['技術開発', 'ビジネス応用', '倫理・規制', '研究', 'その他']の中から一つ選んでください。"
-            "出力は必ず以下のJSON形式で返してください。\n"
-            "例: {\"summary\": \"要約文...\", \"category\": \"カテゴリ名\"}\n\n"
-            f"以下の記事を要約・カテゴリ分けしてください:\n\n{article_content}"
-        )
-
-        # JSONモードでレスポンスを生成するように設定
-        generation_config = genai.types.GenerationConfig(
-            response_mime_type="application/json"
-        )
-
-        # APIを呼び出し
         response = model.generate_content(
             prompt,
-            generation_config=generation_config
+            generation_config=genai.types.GenerationConfig(
+                response_mime_type="application/json"
+            )
         )
-
-        # レスポンスのテキスト部分をJSONとしてパース
         return json.loads(response.text)
-
     except Exception as e:
-        print(f"Gemini APIの処理中にエラーが発生しました: {e}")
-        return {"summary": "要約中にエラーが発生しました。", "category": "エラー"}
+        print(f"要約エラー: {e}")
+        return {"summary": "要約に失敗しました", "category": "エラー"}
 
-def send_to_discord(articles_with_summaries):
-    """整形したニュースをDiscordに送信する"""
-    print("Discordへ通知を送信中...")
 
-    # DiscordのEmbedsを使った見やすいフォーマットを作成
+def send_to_discord(articles):
+    """DiscordのWebhookに送信"""
     embeds = []
-    for article in articles_with_summaries:
+    
+    for article in articles:
         embed = {
             "title": f"📰 {article['title']}",
             "url": article['url'],
             "description": article['summary_data']['summary'],
-            "color": 0x5865F2, # Discordのブランドカラー
-            "fields": [
-                {
-                    "name": "カテゴリ",
-                    "value": f"`{article['summary_data']['category']}`",
-                    "inline": True
-                }
-            ],
+            "color": 0x5865F2,
+            "fields": [{
+                "name": "カテゴリ",
+                "value": f"`{article['summary_data']['category']}`",
+                "inline": True
+            }],
             "footer": {
-                "text": f"Published at: {datetime.strptime(article['publishedAt'], '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d %H:%M')}"
+                "text": f"公開日: {article['publishedAt'][:10]}"
             }
         }
         embeds.append(embed)
 
-    # Webhookに送信するペイロード
     payload = {
-        "username": "AI News Notifier",
-        "avatar_url": "https://i.imgur.com/4M34hi2.png",
-        "content": f"## 📢 今日のAIニューストレンド ({datetime.now().strftime('%Y-%m-%d')})",
+        "username": "AI News Bot",
+        "content": f"## 📢 今日のAIニュース ({datetime.now().strftime('%Y-%m-%d')})",
         "embeds": embeds
     }
 
     try:
         response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
         response.raise_for_status()
-        print("Discordへの通知が正常に完了しました。")
-    except requests.exceptions.RequestException as e:
-        print(f"Discordへの通知送信に失敗しました: {e}")
+        print("Discord通知完了")
+    except requests.RequestException as e:
+        print(f"Discord送信エラー: {e}")
+
 
 def main():
     """メイン処理"""
-    print("AI News Notifierを開始します...")
+    print("AIニュース取得開始...")
+    
+    # ニュース取得
     articles = get_ai_news()
     if not articles:
-        print("取得できるニュースがないため、処理を終了します。")
+        print("取得できるニュースがありません")
         return
 
-    articles_with_summaries = []
+    # 各記事を要約・カテゴリ分け
+    processed_articles = []
     for article in articles:
-        # 記事の本文または説明文を要約対象とする
-        content_to_summarize = article.get('content') or article.get('description', '')
-        # Geminiを呼び出すように変更
-        summary_data = summarize_and_categorize_with_gemini(content_to_summarize)
-
-        # 元の記事情報と要約結果を結合
-        article_info = {
+        content = article.get('content') or article.get('description', '')
+        summary_data = summarize_with_gemini(content)
+        
+        processed_articles.append({
             "title": article['title'],
             "url": article['url'],
             "publishedAt": article['publishedAt'],
             "summary_data": summary_data
-        }
-        articles_with_summaries.append(article_info)
+        })
 
-    if articles_with_summaries:
-        send_to_discord(articles_with_summaries)
-        print("AI News Notifierの処理が正常に完了しました。")
+    # Discord通知
+    send_to_discord(processed_articles)
+    print("処理完了")
+
 
 if __name__ == "__main__":
     main()
