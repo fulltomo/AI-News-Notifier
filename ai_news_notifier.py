@@ -1,49 +1,37 @@
 import os
 import requests
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import google.generativeai as genai
 
-# 環境変数の読み込み
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
+if not all([GNEWS_API_KEY, GEMINI_API_KEY, DISCORD_WEBHOOK_URL]):
+    raise ValueError("APIキーまたはWebhook URLが設定されていません")
 
-# 必要な環境変数のチェック
-if not all([NEWS_API_KEY, GEMINI_API_KEY, DISCORD_WEBHOOK_URL]):
-    raise ValueError("環境変数が設定されていません")
-
-# Gemini APIの設定
 genai.configure(api_key=GEMINI_API_KEY)
 
-
 def get_ai_news():
-    """News APIからAI関連ニュースを取得"""
-    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    
-    url = (f"https://newsapi.org/v2/everything?"
-           f"q=AI&from={yesterday}&sortBy=popularity&"
-           f"language=en&pageSize=5&apiKey={NEWS_API_KEY}")
+    now = datetime.now(timezone.utc)
+    yesterday = now - timedelta(days=1)
+    url = (f"https://gnews.io/api/v4/search?q=AI&lang=ja&max=5&"
+           f"from={yesterday.strftime('%Y-%m-%dT%H:%M:%SZ')}&"
+           f"to={now.strftime('%Y-%m-%dT%H:%M:%SZ')}&token={GNEWS_API_KEY}")
 
     try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json().get("articles", [])
-    except requests.RequestException as e:
-        print(f"ニュース取得エラー: {e}")
+        return requests.get(url).json().get("articles", [])
+    except:
         return []
 
-
 def summarize_with_gemini(content):
-    """Geminiで記事を要約・カテゴリ分け"""
     if not content:
         return {"summary": "内容が取得できませんでした", "category": "不明"}
 
     model = genai.GenerativeModel('gemini-1.5-flash')
-    
     prompt = (
-        "以下のAIニュースを日本語で3文で要約し、"
+        "以下のAIニュースを3文で要約し、"
         "['技術開発', 'ビジネス応用', '倫理・規制', '研究', 'その他']"
         "からカテゴリを選んで、必ず以下の形式で返してください：\n"
         '{"summary": "要約文", "category": "カテゴリ名"}\n\n'
@@ -51,38 +39,26 @@ def summarize_with_gemini(content):
     )
 
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                response_mime_type="application/json"
-            )
-        )
+        response = model.generate_content(prompt,
+            generation_config=genai.types.GenerationConfig(response_mime_type="application/json"))
         return json.loads(response.text)
-    except Exception as e:
-        print(f"要約エラー: {e}")
+    except:
         return {"summary": "要約に失敗しました", "category": "エラー"}
 
-
 def send_to_discord(articles):
-    """DiscordのWebhookに送信"""
     embeds = []
-    
     for article in articles:
-        embed = {
+        published_utc = datetime.fromisoformat(article['publishedAt'].replace('Z', '+00:00'))
+        published_jst = published_utc.astimezone(timezone(timedelta(hours=9)))
+
+        embeds.append({
             "title": f"📰 {article['title']}",
             "url": article['url'],
             "description": article['summary_data']['summary'],
             "color": 0x5865F2,
-            "fields": [{
-                "name": "カテゴリ",
-                "value": f"`{article['summary_data']['category']}`",
-                "inline": True
-            }],
-            "footer": {
-                "text": f"公開日: {article['publishedAt'][:10]}"
-            }
-        }
-        embeds.append(embed)
+            "fields": [{"name": "カテゴリ", "value": f"`{article['summary_data']['category']}`", "inline": True}],
+            "footer": {"text": f"公開日: {published_jst.strftime('%Y-%m-%d %H:%M')}"}
+        })
 
     payload = {
         "username": "AI News Bot",
@@ -91,29 +67,19 @@ def send_to_discord(articles):
     }
 
     try:
-        response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
-        response.raise_for_status()
-        print("Discord通知完了")
-    except requests.RequestException as e:
-        print(f"Discord送信エラー: {e}")
-
+        requests.post(DISCORD_WEBHOOK_URL, json=payload).raise_for_status()
+    except:
+        pass
 
 def main():
-    """メイン処理"""
-    print("AIニュース取得開始...")
-    
-    # ニュース取得
     articles = get_ai_news()
     if not articles:
-        print("取得できるニュースがありません")
         return
 
-    # 各記事を要約・カテゴリ分け
     processed_articles = []
     for article in articles:
-        content = article.get('content') or article.get('description', '')
+        content = article.get('description') or article.get('content', '')
         summary_data = summarize_with_gemini(content)
-        
         processed_articles.append({
             "title": article['title'],
             "url": article['url'],
@@ -121,10 +87,7 @@ def main():
             "summary_data": summary_data
         })
 
-    # Discord通知
     send_to_discord(processed_articles)
-    print("処理完了")
-
 
 if __name__ == "__main__":
     main()
